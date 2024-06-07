@@ -1,0 +1,312 @@
+
+import torch
+from torch.nn import Linear, Sequential, BatchNorm1d, ReLU, Dropout
+from torch_geometric.loader import DataLoader
+from typing import Callable, List, Optional
+import collections
+import pdb
+from copy import deepcopy
+from random import choice
+from torch_geometric.utils import degree
+from itertools import repeat, product
+from torch_geometric.data import InMemoryDataset, download_url, extract_zip
+import shutil
+import networkx as nx
+import matplotlib.pyplot as plt
+import torch.optim as optim
+import glob
+import argparse
+import os
+import os.path as osp
+import sys
+import numpy as np
+import torch
+import torch.nn.functional as F
+from torch_geometric.data import Data
+from torch_geometric.io import read_txt_array
+from torch_geometric.utils import coalesce, remove_self_loops
+from torch_geometric.nn import SAGEConv
+from datetime import datetime
+from tqdm import tqdm
+from sklearn.metrics import f1_score
+import time
+names = [
+    'A', 'graph_indicator', 'node_labels', 'node_attributes', 'node_attributes_2',
+    'edge_labels', 'edge_attributes', 'graph_labels', 'graph_attributes', '7000011_C','7000011_N','7000011_CA','7000011_C1','7000011_C2','7000011_C3','7000011_C4','7000011_C5','7000011_C6'
+]
+
+# to log the output of the experiments to a file
+
+
+class Logger(object):
+    def __init__(self, log_file, mode='out'):
+        if mode == 'out':
+            self.terminal = sys.stdout
+        else:
+            self.terminal = sys.stderr
+
+        self.log = open('{}.{}'.format(log_file, mode), "a")
+
+    def write(self, message):
+        self.terminal.write(message)
+        self.terminal.flush()
+        self.log.write(message)
+        self.log.flush()
+
+    def flush(self):
+        self.terminal.flush()
+        self.log.flush()
+
+    def __del__(self):
+        self.log.close()
+
+
+def read_tu_data(folder, prefix):
+    files = glob.glob(osp.join(folder, f'{prefix}_*.txt'))
+    names = [f.split(os.sep)[-1][len(prefix) + 1:-4] for f in files]
+
+    edge_index = read_file(folder, prefix, 'A', torch.long).t() - 1
+    batch = read_file(folder, prefix, 'graph_indicator', torch.long) - 1
+
+    elements_count = {}
+
+    node_attributes = torch.empty((batch.size(0), 1))
+
+    xx = np.bincount(batch)
+    # print(xx)
+    list = []
+    cc = 0
+    # for i in xx:
+    #     # print(i)
+    #     z = i
+    #     for j in range(i):
+    #         node_attributes[j+cc][0] = z
+    #         # print(z)
+    #     cc = cc + i
+        
+    node_attributes = torch.empty((batch.size(0), 0))
+    # node_attributes1 = torch.empty((batch.size(0), 0))
+    if 'node_attributes' in names:
+        node_attributes = read_file(folder, prefix, 'node_attributes')
+        if node_attributes.dim() == 1:
+            node_attributes = node_attributes.unsqueeze(-1)
+
+    node_labels = torch.empty((batch.size(0), 0))
+    if 'node_labels' in names:
+        node_labels = read_file(folder, prefix, 'node_labels', torch.long)
+        if node_labels.dim() == 1:
+            node_labels = node_labels.unsqueeze(-1)
+        node_labels = node_labels - node_labels.min(dim=0)[0]
+        node_labels = node_labels.unbind(dim=-1)
+        node_labels = [F.one_hot(x, num_classes=-1) for x in node_labels]
+        node_labels = torch.cat(node_labels, dim=-1).to(torch.float)
+
+    edge_attributes = torch.empty((edge_index.size(1), 0))
+    if 'edge_attributes' in names:
+        edge_attributes = read_file(folder, prefix, 'edge_attributes')
+        if edge_attributes.dim() == 1:
+            edge_attributes = edge_attributes.unsqueeze(-1)
+
+    edge_labels = torch.empty((edge_index.size(1), 0))
+    if 'edge_labels' in names:
+        edge_labels = read_file(folder, prefix, 'edge_labels', torch.long)
+        if edge_labels.dim() == 1:
+            edge_labels = edge_labels.unsqueeze(-1)
+        edge_labels = edge_labels - edge_labels.min(dim=0)[0]
+        edge_labels = edge_labels.unbind(dim=-1)
+        edge_labels = [F.one_hot(e, num_classes=-1) for e in edge_labels]
+        edge_labels = torch.cat(edge_labels, dim=-1).to(torch.float)
+
+    # print(node_attributes.shape,node_labels.shape,node_attributes1.shape)   
+    x = cat([node_attributes_2,node_attributes, node_labels,coor_C,coor_N,coor_CA,coor_C1,coor_C2,coor_C3,coor_C4,coor_C5,coor_C6]) ##,node_attributes1
+
+    edge_attr = cat([edge_attributes, edge_labels])
+    print("edge_attr",edge_attr.shape)
+    print("edge_attr",edge_attr,edge_attributes,edge_labels)
+
+    y = None
+    if 'graph_attributes' in names:  # Regression problem.
+        y = read_file(folder, prefix, 'graph_attributes')
+    elif 'graph_labels' in names:  # Classification problem.
+        y = read_file(folder, prefix, 'graph_labels', torch.long)
+        # _, y = y.unique(sorted=True, return_inverse=True)
+
+    num_nodes = edge_index.max().item() + 1 if x is None else x.size(0)
+    edge_index, edge_attr = remove_self_loops(edge_index, edge_attr)
+    edge_index, edge_attr = coalesce(edge_index, edge_attr, num_nodes)
+
+    data = Data(x=x, edge_index=edge_index, edge_attr=edge_attr, y=y)
+    data, slices = split(data, batch)
+    sizes = {
+        'num_node_attributes': node_attributes.size(-1),
+        'num_node_labels': node_labels.size(-1),
+        'num_edge_attributes': edge_attributes.size(-1),
+        'num_edge_labels': edge_labels.size(-1),
+    }
+
+    return data, slices, sizes
+
+
+def read_file(folder, prefix, name, dtype=None):
+    path = osp.join(folder, f'{prefix}_{name}.txt')
+    return read_txt_array(path, sep=',', dtype=dtype)
+
+
+def cat(seq):
+    seq = [item for item in seq if item is not None]
+    seq = [item for item in seq if item.numel() > 0]
+    seq = [item.unsqueeze(-1) if item.dim() == 1 else item for item in seq]
+    return torch.cat(seq, dim=-1) if len(seq) > 0 else None
+
+
+def split(data, batch):
+    node_slice = torch.cumsum(torch.from_numpy(np.bincount(batch)), 0)
+    node_slice = torch.cat([torch.tensor([0]), node_slice])
+
+    row, _ = data.edge_index
+    edge_slice = torch.cumsum(torch.from_numpy(np.bincount(batch[row])), 0)
+    edge_slice = torch.cat([torch.tensor([0]), edge_slice])
+
+    # Edge indices should start at zero for every graph.
+    data.edge_index -= node_slice[batch[row]].unsqueeze(0)
+
+    slices = {'edge_index': edge_slice}
+    if data.x is not None:
+        slices['x'] = node_slice
+    else:
+        # Imitate `collate` functionality:
+        data._num_nodes = torch.bincount(batch).tolist()
+        data.num_nodes = batch.numel()
+    if data.edge_attr is not None:
+        slices['edge_attr'] = edge_slice
+    if data.y is not None:
+        if data.y.size(0) == batch.size(0):
+            slices['y'] = node_slice
+        else:
+            slices['y'] = torch.arange(0, batch[-1] + 2, dtype=torch.long)
+
+    return data, slices
+
+
+class TUDataset(InMemoryDataset):
+
+    url = 'https://www.chrsmrrs.com/graphkerneldatasets'
+    cleaned_url = ('https://raw.githubusercontent.com/nd7141/'
+                   'graph_datasets/master/datasets')
+
+    def __init__(self, root: str, name: str,
+                 transform: Optional[Callable] = None,
+                 pre_transform: Optional[Callable] = None,
+                 pre_filter: Optional[Callable] = None,
+                 use_node_attr: bool = False, use_edge_attr: bool = False,
+                 cleaned: bool = False):
+        self.name = name
+        self.cleaned = cleaned
+        super().__init__(root, transform, pre_transform, pre_filter)
+
+        out = torch.load(self.processed_paths[0])
+        # model.load_state_dict(torch.load(self.processed_paths[0]))
+        # print(out)
+        if not isinstance(out, tuple) or len(out) != 3:
+            raise RuntimeError(
+                "The 'data' object was created by an older version of PyG. "
+                "If this error occurred while loading an already existing "
+                "dataset, remove the 'processed/' directory in the dataset's "
+                "root folder and try again.")
+        self.data, self.slices, self.sizes = out
+
+    @property
+    def raw_dir(self) -> str:
+        name = f'raw{"_cleaned" if self.cleaned else ""}'
+        return osp.join(self.root, self.name, name)
+
+    @property
+    def processed_dir(self) -> str:
+        name = f'processed{"_cleaned" if self.cleaned else ""}'
+        return osp.join(self.root, self.name, name)
+
+    @property
+    def num_node_labels(self) -> int:
+        return self.sizes['num_node_labels']
+
+    @property
+    def num_node_attributes(self) -> int:
+        return self.sizes['num_node_attributes']
+
+    @property
+    def num_edge_labels(self) -> int:
+        return self.sizes['num_edge_labels']
+
+    @property
+    def num_edge_attributes(self) -> int:
+        return self.sizes['num_edge_attributes']
+
+    @property
+    def raw_file_names(self) -> List[str]:
+        names = ['A', 'graph_indicator']
+        return [f'{self.name}_{name}.txt' for name in names]
+
+    @property
+    def processed_file_names(self) -> str:
+        return 'data.pt'
+
+    def download(self):
+        pass
+
+    def process(self):
+        self.data, self.slices, sizes = read_tu_data(self.raw_dir, self.name)
+        # print(sizes)
+        if self.pre_filter is not None or self.pre_transform is not None:
+            # print("#(*(*(*(*(*)))))",get)
+            data_list = [self.get(idx) for idx in range(len(self))]
+
+            if self.pre_filter is not None:
+                data_list = [d for d in data_list if self.pre_filter(d)]
+
+            if self.pre_transform is not None:
+                data_list = [self.pre_transform(d) for d in data_list]
+
+            self.data, self.slices = self.collate(data_list)
+            self._data_list = None  # Reset cache.
+
+        torch.save((self._data, self.slices, sizes), self.processed_paths[0])
+
+    def __repr__(self) -> str:
+        return f'{self.name}({len(self)})'
+
+
+
+from sklearn.metrics import classification_report
+from sklearn.metrics import recall_score
+from sklearn.metrics import precision_score
+from sklearn.metrics import average_precision_score
+# def Average(lst):
+#     return sum(lst) / len(lst)
+f1_score_= []
+recall_score_=[]
+precision_score_=[]
+consolidated_frequency_table = {}
+from typing import Tuple
+
+import torch
+
+
+def set_logger(log_file):
+    sys.stdout = Logger(log_file, 'out')
+
+
+def create_path(path):
+    if not os.path.exists(path):
+        os.makedirs(path)
+
+
+def get_lr(optimizers):
+    if isinstance(optimizers, dict):
+        return optimizers[list(optimizers.keys())[-1]].param_groups[-1]['lr']
+    else:
+        return optimizers.param_groups[-1]['lr']
+
+
+if __name__ == "__main__":
+    train_set = TUDataset(root='/hdd/yishan0128/Fold_class',name='7000011')
+    print(train_set, train_set.node_attr)
