@@ -308,5 +308,5 @@ def get_lr(optimizers):
 
 
 if __name__ == "__main__":
-    train_set = TUDataset(root='/hdd/yishan0128/Fold_class',name='7000011')
+    train_set = TUDataset(root='/hdd/yishan0128/',name='Protein')
     print(train_set, train_set.node_attr)
